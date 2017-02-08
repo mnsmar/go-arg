@@ -74,10 +74,10 @@ type Parser struct {
 }
 
 // Versioned is the interface that the destination struct should implement to
-// make a version string appear at the top of the help message.
+// make a version string appear below the usage message.
 type Versioned interface {
 	// Version returns the version string that will be printed on a line by itself
-	// at the top of the help message.
+	// below the usage message.
 	Version() string
 }
 
