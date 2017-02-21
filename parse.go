@@ -1,12 +1,15 @@
 package arg
 
 import (
+	"encoding"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+
+	scalar "github.com/alexflint/go-scalar"
 )
 
 // spec represents a command line option
@@ -36,7 +39,7 @@ func MustParse(dest ...interface{}) *Parser {
 		fmt.Println(err)
 		os.Exit(-1)
 	}
-	err = p.Parse(os.Args[1:])
+	err = p.Parse(flags())
 	if err == ErrHelp {
 		p.WriteHelp(os.Stdout)
 		os.Exit(0)
@@ -57,7 +60,15 @@ func Parse(dest ...interface{}) error {
 	if err != nil {
 		return err
 	}
-	return p.Parse(os.Args[1:])
+	return p.Parse(flags())
+}
+
+// flags gets all command line arguments other than the first (program name)
+func flags() []string {
+	if len(os.Args) == 0 { // os.Args could be empty
+		return nil
+	}
+	return os.Args[1:]
 }
 
 // Config represents configuration options for an argument parser
@@ -433,4 +444,26 @@ func canParse(t reflect.Type) (parseable, boolean, multiple bool) {
 	}
 
 	return false, false, false
+}
+
+var textUnmarshalerType = reflect.TypeOf([]encoding.TextUnmarshaler{}).Elem()
+
+// isScalar returns true if the type can be parsed from a single string
+func isScalar(t reflect.Type) (parseable, boolean bool) {
+	parseable = scalar.CanParse(t)
+	switch {
+	case t.Implements(textUnmarshalerType):
+		return parseable, false
+	case t.Kind() == reflect.Bool:
+		return parseable, true
+	case t.Kind() == reflect.Ptr && t.Elem().Kind() == reflect.Bool:
+		return parseable, true
+	default:
+		return parseable, false
+	}
+}
+
+// set a value from a string
+func setScalar(v reflect.Value, s string) error {
+	return scalar.ParseValue(v, s)
 }
