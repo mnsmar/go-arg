@@ -67,6 +67,28 @@ func TestInt(t *testing.T) {
 	assert.EqualValues(t, 8, *args.Ptr)
 }
 
+func TestNegativeInt(t *testing.T) {
+	var args struct {
+		Foo int
+	}
+	err := parse("-foo -100", &args)
+	require.NoError(t, err)
+	assert.EqualValues(t, args.Foo, -100)
+}
+
+func TestNegativeIntAndFloatAndTricks(t *testing.T) {
+	var args struct {
+		Foo int
+		Bar float64
+		N   int `arg:"--100"`
+	}
+	err := parse("-foo -100 -bar -60.14 -100 -100", &args)
+	require.NoError(t, err)
+	assert.EqualValues(t, args.Foo, -100)
+	assert.EqualValues(t, args.Bar, -60.14)
+	assert.EqualValues(t, args.N, -100)
+}
+
 func TestUint(t *testing.T) {
 	var args struct {
 		Foo uint
@@ -250,6 +272,15 @@ func TestRequiredPositional(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestRequiredPositionalMultiple(t *testing.T) {
+	var args struct {
+		Input    string   `arg:"positional"`
+		Multiple []string `arg:"positional,required"`
+	}
+	err := parse("foo", &args)
+	assert.Error(t, err)
+}
+
 func TestTooManyPositional(t *testing.T) {
 	var args struct {
 		Input  string `arg:"positional"`
@@ -268,6 +299,17 @@ func TestMultiple(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []int{1, 2, 3}, args.Foo)
 	assert.Equal(t, []string{"x", "y", "z"}, args.Bar)
+}
+
+func TestMultiplePositionals(t *testing.T) {
+	var args struct {
+		Input    string   `arg:"positional"`
+		Multiple []string `arg:"positional,required"`
+	}
+	err := parse("foo a b c", &args)
+	assert.NoError(t, err)
+	assert.Equal(t, "foo", args.Input)
+	assert.Equal(t, []string{"a", "b", "c"}, args.Multiple)
 }
 
 func TestMultipleWithEq(t *testing.T) {
@@ -316,6 +358,14 @@ func TestMissingRequired(t *testing.T) {
 	var args struct {
 		Foo string   `arg:"required"`
 		X   []string `arg:"positional"`
+	}
+	err := parse("x", &args)
+	assert.Error(t, err)
+}
+
+func TestNonsenseKey(t *testing.T) {
+	var args struct {
+		X []string `arg:"positional, nonsense"`
 	}
 	err := parse("x", &args)
 	assert.Error(t, err)
@@ -549,6 +599,32 @@ func TestTextUnmarshaler(t *testing.T) {
 	assert.Equal(t, 3, args.Foo.val)
 }
 
+func TestRepeatedTextUnmarshaler(t *testing.T) {
+	// fields that implement TextUnmarshaler should be parsed using that interface
+	var args struct {
+		Foo []*textUnmarshaler
+	}
+	err := parse("--foo abc d ef", &args)
+	require.NoError(t, err)
+	require.Len(t, args.Foo, 3)
+	assert.Equal(t, 3, args.Foo[0].val)
+	assert.Equal(t, 1, args.Foo[1].val)
+	assert.Equal(t, 2, args.Foo[2].val)
+}
+
+func TestPositionalTextUnmarshaler(t *testing.T) {
+	// fields that implement TextUnmarshaler should be parsed using that interface
+	var args struct {
+		Foo []*textUnmarshaler `arg:"positional"`
+	}
+	err := parse("abc d ef", &args)
+	require.NoError(t, err)
+	require.Len(t, args.Foo, 3)
+	assert.Equal(t, 3, args.Foo[0].val)
+	assert.Equal(t, 1, args.Foo[1].val)
+	assert.Equal(t, 2, args.Foo[2].val)
+}
+
 type boolUnmarshaler bool
 
 func (p *boolUnmarshaler) UnmarshalText(b []byte) error {
@@ -738,4 +814,68 @@ func TestHyphenInMultiPositional(t *testing.T) {
 	err := parse("--- x - y", &args)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"---", "x", "-", "y"}, args.Foo)
+}
+
+func TestSeparate(t *testing.T) {
+	for _, val := range []string{"-f one", "-f=one", "--foo one", "--foo=one"} {
+		var args struct {
+			Foo []string `arg:"--foo,-f,separate"`
+		}
+
+		err := parse(val, &args)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"one"}, args.Foo)
+	}
+}
+
+func TestSeparateWithDefault(t *testing.T) {
+	args := struct {
+		Foo []string `arg:"--foo,-f,separate"`
+	}{
+		Foo: []string{"default"},
+	}
+
+	err := parse("-f one -f=two", &args)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"default", "one", "two"}, args.Foo)
+}
+
+func TestSeparateWithPositional(t *testing.T) {
+	var args struct {
+		Foo []string `arg:"--foo,-f,separate"`
+		Bar string   `arg:"positional"`
+		Moo string   `arg:"positional"`
+	}
+
+	err := parse("zzz --foo one -f=two --foo=three -f four aaa", &args)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"one", "two", "three", "four"}, args.Foo)
+	assert.Equal(t, "zzz", args.Bar)
+	assert.Equal(t, "aaa", args.Moo)
+}
+
+func TestSeparatePositionalInterweaved(t *testing.T) {
+	var args struct {
+		Foo  []string `arg:"--foo,-f,separate"`
+		Bar  []string `arg:"--bar,-b,separate"`
+		Pre  string   `arg:"positional"`
+		Post []string `arg:"positional"`
+	}
+
+	err := parse("zzz -f foo1 -b=bar1 --foo=foo2 -b bar2 post1 -b bar3 post2 post3", &args)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"foo1", "foo2"}, args.Foo)
+	assert.Equal(t, []string{"bar1", "bar2", "bar3"}, args.Bar)
+	assert.Equal(t, "zzz", args.Pre)
+	assert.Equal(t, []string{"post1", "post2", "post3"}, args.Post)
+}
+
+func TestSpacesAllowedInTags(t *testing.T) {
+	var args struct {
+		Foo []string `arg:"--foo, -f, separate, required, help:quite nice really"`
+	}
+
+	err := parse("--foo one -f=two --foo=three -f four", &args)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"one", "two", "three", "four"}, args.Foo)
 }

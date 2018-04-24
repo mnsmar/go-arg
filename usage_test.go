@@ -7,18 +7,41 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"strings"
+	"fmt"
+	"errors"
 )
 
+type NameDotName struct {
+	Head, Tail string
+}
+
+func (n *NameDotName) UnmarshalText(b []byte) error {
+	s := string(b)
+	pos := strings.Index(s, ".")
+	if pos == -1 {
+		return fmt.Errorf("missing period in %s", s)
+	}
+	n.Head = s[:pos]
+	n.Tail = s[pos+1:]
+	return nil
+}
+
+func (n *NameDotName) MarshalText() (text []byte, err error) {
+	text = []byte(fmt.Sprintf("%s.%s", n.Head, n.Tail))
+	return
+}
+
 func TestWriteUsage(t *testing.T) {
-	expectedUsage := "usage: example [--name NAME] [--value VALUE] [--verbose] [--dataset DATASET] [--optimize OPTIMIZE] [--ids IDS] [--values VALUES] [--workers WORKERS] INPUT [OUTPUT [OUTPUT ...]]\n"
+	expectedUsage := "Usage: example [--name NAME] [--value VALUE] [--verbose] [--dataset DATASET] [--optimize OPTIMIZE] [--ids IDS] [--values VALUES] [--workers WORKERS] [--file FILE] INPUT [OUTPUT [OUTPUT ...]]\n"
 
-	expectedHelp := `usage: example [--name NAME] [--value VALUE] [--verbose] [--dataset DATASET] [--optimize OPTIMIZE] [--ids IDS] [--values VALUES] [--workers WORKERS] INPUT [OUTPUT [OUTPUT ...]]
+	expectedHelp := `Usage: example [--name NAME] [--value VALUE] [--verbose] [--dataset DATASET] [--optimize OPTIMIZE] [--ids IDS] [--values VALUES] [--workers WORKERS] [--file FILE] INPUT [OUTPUT [OUTPUT ...]]
 
-positional arguments:
-  input
-  output                 list of outputs
+Positional arguments:
+  INPUT
+  OUTPUT                 list of outputs
 
-options:
+Options:
   --name NAME            name to use [default: Foo Bar]
   --value VALUE          secret value [default: 42]
   --verbose, -v          verbosity level
@@ -29,24 +52,27 @@ options:
   --values VALUES        Values [default: [3.14 42 256]]
   --workers WORKERS, -w WORKERS
                          number of workers to start
+  --file FILE, -f FILE   File with mandatory extension [default: scratch.txt]
   --help, -h             display this help and exit
 `
 	var args struct {
 		Input    string    `arg:"positional"`
-		Output   []string  `arg:"positional,help:list of outputs"`
-		Name     string    `arg:"help:name to use"`
-		Value    int       `arg:"help:secret value"`
-		Verbose  bool      `arg:"-v,help:verbosity level"`
-		Dataset  string    `arg:"help:dataset to use"`
-		Optimize int       `arg:"-O,help:optimization level"`
-		Ids      []int64   `arg:"help:Ids"`
-		Values   []float64 `arg:"help:Values"`
-		Workers  int       `arg:"-w,env:WORKERS,help:number of workers to start"`
+		Output   []string  `arg:"positional" help:"list of outputs"`
+		Name     string    `help:"name to use"`
+		Value    int       `help:"secret value"`
+		Verbose  bool      `arg:"-v" help:"verbosity level"`
+		Dataset  string    `help:"dataset to use"`
+		Optimize int       `arg:"-O" help:"optimization level"`
+		Ids      []int64   `help:"Ids"`
+		Values   []float64 `help:"Values"`
+		Workers  int       `arg:"-w,env:WORKERS" help:"number of workers to start"`
+		File     *NameDotName `arg:"-f" help:"File with mandatory extension"`
 	}
 	args.Name = "Foo Bar"
 	args.Value = 42
 	args.Values = []float64{3.14, 42, 256}
-	p, err := NewParser(Config{}, &args)
+	args.File = &NameDotName{"scratch", "txt"}
+	p, err := NewParser(Config{"example"}, &args)
 	require.NoError(t, err)
 
 	os.Args[0] = "example"
@@ -60,18 +86,77 @@ options:
 	assert.Equal(t, expectedHelp, help.String())
 }
 
-func TestUsageLongPositionalWithHelp(t *testing.T) {
-	expectedHelp := `usage: example VERYLONGPOSITIONALWITHHELP
+type MyEnum int
 
-positional arguments:
-  verylongpositionalwithhelp
-                         this positional argument is very long
+func (n *MyEnum) UnmarshalText(b []byte) error {
+	b = []byte("Hello")
+	return nil
+}
 
-options:
+func (n *MyEnum) MarshalText() (text []byte, err error) {
+	s := "There was a problem"
+	text = []byte(s)
+	err = errors.New(s)
+	return
+}
+
+func TestUsageError(t *testing.T) {
+	expectedHelp := `Usage: example [--name NAME]
+
+Options:
+  --name NAME [default: error: There was a problem]
   --help, -h             display this help and exit
 `
 	var args struct {
-		VeryLongPositionalWithHelp string `arg:"positional,help:this positional argument is very long"`
+		Name *MyEnum
+	}
+	v := MyEnum(42)
+	args.Name = &v
+	p, err := NewParser(Config{"example"}, &args)
+
+	// NB: some might might expect there to be an error here
+	require.NoError(t, err)
+
+	var help bytes.Buffer
+	p.WriteHelp(&help)
+	assert.Equal(t, expectedHelp, help.String())
+}
+
+func TestUsageLongPositionalWithHelp_legacyForm(t *testing.T) {
+	expectedHelp := `Usage: example VERYLONGPOSITIONALWITHHELP
+
+Positional arguments:
+  VERYLONGPOSITIONALWITHHELP
+                         this positional argument is very long but cannot include commas
+
+Options:
+  --help, -h             display this help and exit
+`
+	var args struct {
+		VeryLongPositionalWithHelp string `arg:"positional,help:this positional argument is very long but cannot include commas"`
+	}
+
+	p, err := NewParser(Config{}, &args)
+	require.NoError(t, err)
+
+	os.Args[0] = "example"
+	var help bytes.Buffer
+	p.WriteHelp(&help)
+	assert.Equal(t, expectedHelp, help.String())
+}
+
+func TestUsageLongPositionalWithHelp_newForm(t *testing.T) {
+	expectedHelp := `Usage: example VERYLONGPOSITIONALWITHHELP
+
+Positional arguments:
+  VERYLONGPOSITIONALWITHHELP
+                         this positional argument is very long, and includes: commas, colons etc
+
+Options:
+  --help, -h             display this help and exit
+`
+	var args struct {
+		VeryLongPositionalWithHelp string `arg:"positional" help:"this positional argument is very long, and includes: commas, colons etc"`
 	}
 
 	p, err := NewParser(Config{}, &args)
@@ -84,9 +169,9 @@ options:
 }
 
 func TestUsageWithProgramName(t *testing.T) {
-	expectedHelp := `usage: myprogram
+	expectedHelp := `Usage: myprogram
 
-options:
+Options:
   --help, -h             display this help and exit
 `
 	config := Config{
@@ -110,9 +195,9 @@ func (versioned) Version() string {
 
 func TestUsageWithVersion(t *testing.T) {
 	expectedHelp := `example 3.2.1
-usage: example
+Usage: example
 
-options:
+Options:
   --help, -h             display this help and exit
   --version              display version and exit
 `
@@ -138,10 +223,15 @@ func (described) Description() string {
 }
 
 func TestUsageWithDescription(t *testing.T) {
+<<<<<<< HEAD
 	expectedHelp := `usage: example
 this program does this and that
+=======
+	expectedHelp := `this program does this and that
+Usage: example
+>>>>>>> 074ee5f759999d103724b5594e33901adeb28e73
 
-options:
+Options:
   --help, -h             display this help and exit
 `
 	os.Args[0] = "example"
@@ -156,4 +246,26 @@ options:
 	if expectedHelp != actual {
 		t.Fail()
 	}
+}
+
+func TestRequiredMultiplePositionals(t *testing.T) {
+	expectedHelp := `Usage: example REQUIREDMULTIPLE [REQUIREDMULTIPLE ...]
+
+Positional arguments:
+  REQUIREDMULTIPLE       required multiple positional
+
+Options:
+  --help, -h             display this help and exit
+`
+	var args struct {
+		RequiredMultiple []string `arg:"positional,required" help:"required multiple positional"`
+	}
+
+	p, err := NewParser(Config{}, &args)
+	require.NoError(t, err)
+
+	os.Args[0] = "example"
+	var help bytes.Buffer
+	p.WriteHelp(&help)
+	assert.Equal(t, expectedHelp, help.String())
 }

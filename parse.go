@@ -20,6 +20,7 @@ type spec struct {
 	multiple   bool
 	required   bool
 	positional bool
+	separate   bool
 	help       string
 	env        string
 	wasPresent bool
@@ -152,8 +153,13 @@ func NewParser(config Config, dests ...interface{}) (*Parser, error) {
 				dest: val,
 			}
 
+			help, exists := field.Tag.Lookup("help")
+			if exists {
+				spec.help = help
+			}
+
 			// Check whether this field is supported. It's good to do this here rather than
-			// wait until setScalar because it means that a program with invalid argument
+			// wait until ParseValue because it means that a program with invalid argument
 			// fields will always fail regardless of whether the arguments it received
 			// exercised those fields.
 			var parseable bool
@@ -167,6 +173,7 @@ func NewParser(config Config, dests ...interface{}) (*Parser, error) {
 			// Look at the tag
 			if tag != "" {
 				for _, key := range strings.Split(tag, ",") {
+					key = strings.TrimLeft(key, " ")
 					var value string
 					if pos := strings.Index(key, ":"); pos != -1 {
 						value = key[pos+1:]
@@ -189,7 +196,9 @@ func NewParser(config Config, dests ...interface{}) (*Parser, error) {
 						spec.required = true
 					case key == "positional":
 						spec.positional = true
-					case key == "help":
+					case key == "separate":
+						spec.separate = true
+					case key == "help": // deprecated
 						spec.help = value
 					case key == "env":
 						// Use override name if provided
@@ -266,7 +275,7 @@ func process(specs []*spec, args []string) error {
 		}
 		if spec.env != "" {
 			if value, found := os.LookupEnv(spec.env); found {
-				err := setScalar(spec.dest, value)
+				err := scalar.ParseValue(spec.dest, value)
 				if err != nil {
 					return fmt.Errorf("error processing environment variable %s: %v", spec.env, err)
 				}
@@ -314,11 +323,14 @@ func process(specs []*spec, args []string) error {
 				for i+1 < len(args) && !isFlag(args[i+1]) {
 					values = append(values, args[i+1])
 					i++
+					if spec.separate {
+						break
+					}
 				}
 			} else {
 				values = append(values, value)
 			}
-			err := setSlice(spec.dest, values)
+			err := setSlice(spec.dest, values, !spec.separate)
 			if err != nil {
 				return fmt.Errorf("error processing %s: %v", arg, err)
 			}
@@ -333,14 +345,17 @@ func process(specs []*spec, args []string) error {
 
 		// if we have something like "--foo" then the value is the next argument
 		if value == "" {
-			if i+1 == len(args) || isFlag(args[i+1]) {
+			if i+1 == len(args) {
+				return fmt.Errorf("missing value for %s", arg)
+			}
+			if !nextIsNumeric(spec.dest.Type(), args[i+1]) && isFlag(args[i+1]) {
 				return fmt.Errorf("missing value for %s", arg)
 			}
 			value = args[i+1]
 			i++
 		}
 
-		err := setScalar(spec.dest, value)
+		err := scalar.ParseValue(spec.dest, value)
 		if err != nil {
 			return fmt.Errorf("error processing %s: %v", arg, err)
 		}
@@ -350,13 +365,16 @@ func process(specs []*spec, args []string) error {
 	for _, spec := range specs {
 		if spec.positional {
 			if spec.multiple {
-				err := setSlice(spec.dest, positionals)
+				if spec.required && len(positionals) == 0 {
+					return fmt.Errorf("%s is required", spec.long)
+				}
+				err := setSlice(spec.dest, positionals, true)
 				if err != nil {
 					return fmt.Errorf("error processing %s: %v", spec.long, err)
 				}
 				positionals = nil
 			} else if len(positionals) > 0 {
-				err := setScalar(spec.dest, positionals[0])
+				err := scalar.ParseValue(spec.dest, positionals[0])
 				if err != nil {
 					return fmt.Errorf("error processing %s: %v", spec.long, err)
 				}
@@ -370,6 +388,19 @@ func process(specs []*spec, args []string) error {
 		return fmt.Errorf("too many positional arguments at '%s'", positionals[0])
 	}
 	return nil
+}
+
+func nextIsNumeric(t reflect.Type, s string) bool {
+	switch t.Kind() {
+	case reflect.Ptr:
+		return nextIsNumeric(t.Elem(), s)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64, reflect.Float32, reflect.Float64, reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		v := reflect.New(t)
+		err := scalar.ParseValue(v, s)
+		return err == nil
+	default:
+		return false
+	}
 }
 
 // isFlag returns true if a token is a flag such as "-v" or "--user" but not "-" or "--"
@@ -388,26 +419,26 @@ func validate(spec []*spec) error {
 }
 
 // parse a value as the appropriate type and store it in the struct
-func setSlice(dest reflect.Value, values []string) error {
+func setSlice(dest reflect.Value, values []string, trunc bool) error {
 	if !dest.CanSet() {
 		return fmt.Errorf("field is not writable")
 	}
 
 	var ptr bool
 	elem := dest.Type().Elem()
-	if elem.Kind() == reflect.Ptr {
+	if elem.Kind() == reflect.Ptr && !elem.Implements(textUnmarshalerType) {
 		ptr = true
 		elem = elem.Elem()
 	}
 
 	// Truncate the dest slice in case default values exist
-	if !dest.IsNil() {
+	if trunc && !dest.IsNil() {
 		dest.SetLen(0)
 	}
 
 	for _, s := range values {
 		v := reflect.New(elem)
-		if err := setScalar(v.Elem(), s); err != nil {
+		if err := scalar.ParseValue(v.Elem(), s); err != nil {
 			return err
 		}
 		if !ptr {
@@ -420,7 +451,8 @@ func setSlice(dest reflect.Value, values []string) error {
 
 // canParse returns true if the type can be parsed from a string
 func canParse(t reflect.Type) (parseable, boolean, multiple bool) {
-	parseable, boolean = isScalar(t)
+	parseable = scalar.CanParse(t)
+	boolean = isBoolean(t)
 	if parseable {
 		return
 	}
@@ -435,7 +467,8 @@ func canParse(t reflect.Type) (parseable, boolean, multiple bool) {
 		t = t.Elem()
 	}
 
-	parseable, boolean = isScalar(t)
+	parseable = scalar.CanParse(t)
+	boolean = isBoolean(t)
 	if parseable {
 		return
 	}
@@ -445,7 +478,8 @@ func canParse(t reflect.Type) (parseable, boolean, multiple bool) {
 		t = t.Elem()
 	}
 
-	parseable, boolean = isScalar(t)
+	parseable = scalar.CanParse(t)
+	boolean = isBoolean(t)
 	if parseable {
 		return
 	}
@@ -455,22 +489,16 @@ func canParse(t reflect.Type) (parseable, boolean, multiple bool) {
 
 var textUnmarshalerType = reflect.TypeOf([]encoding.TextUnmarshaler{}).Elem()
 
-// isScalar returns true if the type can be parsed from a single string
-func isScalar(t reflect.Type) (parseable, boolean bool) {
-	parseable = scalar.CanParse(t)
+// isBoolean returns true if the type can be parsed from a single string
+func isBoolean(t reflect.Type) bool {
 	switch {
 	case t.Implements(textUnmarshalerType):
-		return parseable, false
+		return false
 	case t.Kind() == reflect.Bool:
-		return parseable, true
+		return true
 	case t.Kind() == reflect.Ptr && t.Elem().Kind() == reflect.Bool:
-		return parseable, true
+		return true
 	default:
-		return parseable, false
+		return false
 	}
-}
-
-// set a value from a string
-func setScalar(v reflect.Value, s string) error {
-	return scalar.ParseValue(v, s)
 }

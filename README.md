@@ -37,7 +37,7 @@ arg.MustParse(&args)
 
 ```shell
 $ ./example
-usage: example --id ID [--timeout TIMEOUT]
+Usage: example --id ID [--timeout TIMEOUT]
 error: --id is required
 ```
 
@@ -99,28 +99,31 @@ Workers: 4
 var args struct {
 	Input    string   `arg:"positional"`
 	Output   []string `arg:"positional"`
-	Verbose  bool     `arg:"-v,help:verbosity level"`
-	Dataset  string   `arg:"help:dataset to use"`
-	Optimize int      `arg:"-O,help:optimization level"`
+	Verbose  bool     `arg:"-v" help:"verbosity level"`
+	Dataset  string   `help:"dataset to use"`
+	Optimize int      `arg:"-O" help:"optimization level"`
 }
 arg.MustParse(&args)
 ```
 
 ```shell
 $ ./example -h
-usage: [--verbose] [--dataset DATASET] [--optimize OPTIMIZE] [--help] INPUT [OUTPUT [OUTPUT ...]] 
+Usage: [--verbose] [--dataset DATASET] [--optimize OPTIMIZE] [--help] INPUT [OUTPUT [OUTPUT ...]] 
 
-positional arguments:
-  input
-  output
+Positional arguments:
+  INPUT 
+  OUTPUT
 
-options:
+Options:
   --verbose, -v            verbosity level
   --dataset DATASET        dataset to use
   --optimize OPTIMIZE, -O OPTIMIZE
                            optimization level
   --help, -h               print this help message
 ```
+
+As the example above shows, the `help` tag can be used in conjunction with `arg`, or instead. When used
+together, they can appear in either order.
 
 ### Default values
 
@@ -148,6 +151,22 @@ fmt.Printf("Fetching the following IDs from %s: %q", args.Database, args.IDs)
 Fetching the following IDs from foo: [1 2 3]
 ```
 
+### Arguments that can be specified multiple times, mixed with positionals
+```go
+var args struct {
+    Commands  []string `arg:"-c,separate"`
+    Files     []string `arg:"-f,separate"`
+    Databases []string `arg:"positional"`
+}
+```
+
+```shell
+./example -c cmd1 db1 -f file1 db2 -c cmd2 -f file2 -f file3 db3 -c cmd3
+Commands: [cmd1 cmd2 cmd3]
+Files [file1 file2 file3]
+Databases [db1 db2 db3]
+```
+
 ### Custom validation
 ```go
 var args struct {
@@ -162,7 +181,7 @@ if args.Foo == "" && args.Bar == "" {
 
 ```shell
 ./example
-usage: samples [--foo FOO] [--bar BAR]
+Usage: samples [--foo FOO] [--bar BAR]
 error: you must provide one of --foo and --bar
 ```
 
@@ -246,20 +265,38 @@ func (n *NameDotName) UnmarshalText(b []byte) error {
 	return nil
 }
 
+// optional: implement in case you want to display a default value in the usage string
+func (n *NameDotName) MarshalText() (text []byte, err error) {
+	text = []byte(fmt.Sprintf("%s.%s", n.Head, n.Tail))
+	return
+}
+
 func main() {
 	var args struct {
 		Name *NameDotName
 	}
+	// set default
+	args.Name = &NameDotName{"file", "txt"}
 	arg.MustParse(&args)
 	fmt.Printf("%#v\n", args.Name)
 }
 ```
 ```shell
+$ ./example --help
+Usage: test [--name NAME]
+
+Options:
+  --name NAME [default: file.txt]
+  --help, -h             display this help and exit
+
+$ ./example
+&main.NameDotName{Head:"file", Tail:"txt"}
+
 $ ./example --name=foo.bar
 &main.NameDotName{Head:"foo", Tail:"bar"}
 
 $ ./example --name=oops
-usage: example [--name NAME]
+Usage: example [--name NAME]
 error: error processing --name: missing period in "oops"
 ```
 
@@ -285,12 +322,12 @@ $ ./example -h
 usage: example [--foo FOO]
 this program does this and that
 
-options:
+Options:
   --foo FOO
   --help, -h             display this help and exit
 ```
 
-### Documentation
+### API Documentation
 
 https://godoc.org/github.com/alexflint/go-arg
 
@@ -303,3 +340,7 @@ The shortcomings of the `flag` library that ships in the standard library are we
 Many third-party argument parsing libraries are geared for writing sophisticated command line interfaces. The excellent `codegangsta/cli` is perfect for working with multiple sub-commands and nested flags, but is probably overkill for a simple script with a handful of flags.
 
 The main idea behind `go-arg` is that Go already has an excellent way to describe data structures using Go structs, so there is no need to develop more levels of abstraction on top of this. Instead of one API to specify which arguments your program accepts, and then another API to get the values of those arguments, why not replace both with a single struct?
+
+### Backward Compatibility Notes
+
+The tags have changed recently. Earlier versions required the help text to be part of the `arg` tag. This is still supported but is now deprecated. Instead, you should use a separate `help` tag, described above, which removes most of the limits on the text you can write. In particular, you will need to use the new `help` tag if your help text includes any commas.
